@@ -25,8 +25,6 @@ static FlowStorageId g_flow_storage_ngrep_id = { .id = -1 };
 hs_scratch_t *scratch_stream;
 hs_database_t *hs_db_stream = NULL;
 
-extern libsuricata_tcp_cb AppLayerTCPDataCallback;
-
 #define NGREP_RINGBUFFER_SIZE 0x1000 // 4096
 
 typedef struct NgrepStorageStream {
@@ -133,18 +131,21 @@ static void NgrepFillRingBuffer(NgrepStorageStream *ns, uint8_t *data, uint32_t 
     ns->end += data_len;
 }
 
-static bool NgrepTCPCallback(uint8_t *data, uint32_t data_len, uint8_t flags, Flow *f) {
+static int NgrepTCPCallback(void *tv, void *ra_ctx, Packet *p, Flow *f,
+                             TcpSession *ssn, TcpStream **stream,
+                             uint8_t *data, uint32_t data_len,
+                             uint8_t flags) {
     NgrepStorageStreams *nss = (NgrepStorageStreams *)FlowGetStorageById(f, g_flow_storage_ngrep_id);
     if (nss == NULL) {
         nss = malloc(sizeof(NgrepStorageStreams));
         memset(nss, 0, sizeof(NgrepStorageStreams));
         if (hs_open_stream(hs_db_stream, 0, &nss->toc.hstr) != HS_SUCCESS) {
             fprintf(stderr, "hs_open_stream failed\n");
-            return true;
+            return -1;
         }
         if (hs_open_stream(hs_db_stream, 0, &nss->tos.hstr) != HS_SUCCESS) {
             fprintf(stderr, "hs_open_stream failed\n");
-            return true;
+            return -1;
         }
         FlowSetStorageById(f, g_flow_storage_ngrep_id, nss);
     }
@@ -156,7 +157,7 @@ static bool NgrepTCPCallback(uint8_t *data, uint32_t data_len, uint8_t flags, Fl
         ns = &nss->tos;
     } else {
         fprintf(stderr, "flags is neither STREAM_TOCLIENT nor STREAM_TOSERVER\n");
-        return true;
+        return -2;
     }
     if (data == NULL && data_len == 0) {
         // eof
@@ -176,8 +177,9 @@ static bool NgrepTCPCallback(uint8_t *data, uint32_t data_len, uint8_t flags, Fl
             fprintf(stderr, "warning, hs_scan failed\n");
         }
     }
-    // stop further app-layer processing by suricata
-    return true;
+    const int direction = (flags & STREAM_TOSERVER) ? 0 : 1;
+    StreamTcpUpdateAppLayerProgress(ssn, direction, data_len);
+    return 0;
 }
 
 static void libsuricata_init() {
@@ -204,7 +206,8 @@ static void libsuricata_init() {
     extern intmax_t max_pending_packets;
     max_pending_packets = 128;
     PacketPoolInit();
-    AppLayerTCPDataCallback = NgrepTCPCallback;
+    // override tcp data callback
+    AppLayerHandleTCPData = NgrepTCPCallback;
 }
 
 static void NgrepFlowStorageFree(void *nhs) {
